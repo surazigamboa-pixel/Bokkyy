@@ -1,126 +1,81 @@
 import os
 import requests
+import xml.etree.ElementTree as ET
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-def get_author(book):
-    return ", ".join(a.get("name", "") for a in book.get("authors", [])) or "Autor desconocido"
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 Bookkii.\n\n"
-        "Comandos:\n"
+        "📚 Bot de ePub.\n\n"
+        "Usa:\n"
         "/buscar dracula\n"
-        "/gutenberg sherlock holmes\n"
-        "/openlibrary harry potter\n"
-        "/libro 1342"
+        "/libro 1342\n\n"
+        "Busca en Project Gutenberg y Standard Ebooks."
     )
 
+def text_match(query, *texts):
+    q = query.lower()
+    return q in " ".join(t or "" for t in texts).lower()
+
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = " ".join(context.args)
+    query = " ".join(context.args).strip()
     if not query:
         await update.message.reply_text("Escribe así:\n/buscar dracula")
         return
 
-    await update.message.reply_text("🔎 Buscando en bibliotecas legales...")
+    await update.message.reply_text("🔎 Buscando ePub legales...")
 
-    mensajes = []
+    msg = "📚 Resultados:\n\n"
 
     # Project Gutenberg / Gutendex
     try:
         r = requests.get("https://gutendex.com/books/", params={"search": query}, timeout=20)
-        results = r.json().get("results", [])[:5]
-
-        if results:
-            msg = "📘 Project Gutenberg:\n\n"
-            for book in results:
-                msg += (
-                    f"📖 {book.get('title')}\n"
-                    f"✍️ {get_author(book)}\n"
-                    f"⬇️ /libro {book.get('id')}\n\n"
-                )
-            mensajes.append(msg)
+        for book in r.json().get("results", [])[:6]:
+            title = book.get("title", "Sin título")
+            authors = ", ".join(a.get("name", "") for a in book.get("authors", [])) or "Autor desconocido"
+            book_id = book.get("id")
+            msg += f"📘 {title}\n✍️ {authors}\n⬇️ /libro {book_id}\n\n"
     except Exception:
         pass
 
-    # Open Library
+    # Standard Ebooks OPDS
     try:
-        r = requests.get(
-            "https://openlibrary.org/search.json",
-            params={"q": query, "limit": 5},
-            timeout=20
-        )
-        docs = r.json().get("docs", [])[:5]
+        r = requests.get("https://standardebooks.org/opds/all", timeout=30)
+        root = ET.fromstring(r.content)
+        ns = {"a": "http://www.w3.org/2005/Atom"}
 
-        if docs:
-            msg = "🌐 Open Library:\n\n"
-            for d in docs:
-                title = d.get("title", "Sin título")
-                authors = ", ".join(d.get("author_name", [])[:2]) or "Autor desconocido"
-                year = d.get("first_publish_year", "s/f")
-                key = d.get("key", "")
-                link = f"https://openlibrary.org{key}"
+        found = 0
+        for entry in root.findall("a:entry", ns):
+            title = entry.findtext("a:title", default="", namespaces=ns)
+            author_el = entry.find("a:author/a:name", ns)
+            author = author_el.text if author_el is not None else "Autor desconocido"
 
-                ebook_status = d.get("ebook_access", "unknown")
-                msg += (
-                    f"📖 {title}\n"
-                    f"✍️ {authors}\n"
-                    f"📅 {year}\n"
-                    f"🔗 {link}\n"
-                    f"Estado: {ebook_status}\n\n"
-                )
-            mensajes.append(msg)
+            if not text_match(query, title, author):
+                continue
+
+            epub = None
+            for link in entry.findall("a:link", ns):
+                href = link.attrib.get("href", "")
+                typ = link.attrib.get("type", "")
+                if "epub" in typ or href.endswith(".epub"):
+                    epub = href
+                    break
+
+            if epub:
+                found += 1
+                msg += f"📗 {title}\n✍️ {author}\n⬇️ /se {epub}\n\n"
+
+            if found >= 6:
+                break
     except Exception:
         pass
 
-    if not mensajes:
-        await update.message.reply_text("No encontré resultados legales.")
-        return
-
-    for msg in mensajes:
+    if msg.strip() == "📚 Resultados:":
+        await update.message.reply_text("No encontré ePub legales para esa búsqueda.")
+    else:
         await update.message.reply_text(msg[:4000])
-
-async def gutenberg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.args = context.args
-    await buscar(update, context)
-
-async def openlibrary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = " ".join(context.args)
-    if not query:
-        await update.message.reply_text("Escribe así:\n/openlibrary don quijote")
-        return
-
-    r = requests.get(
-        "https://openlibrary.org/search.json",
-        params={"q": query, "limit": 10},
-        timeout=20
-    )
-    docs = r.json().get("docs", [])
-
-    if not docs:
-        await update.message.reply_text("No encontré resultados en Open Library.")
-        return
-
-    msg = "🌐 Resultados en Open Library:\n\n"
-    for d in docs[:8]:
-        title = d.get("title", "Sin título")
-        authors = ", ".join(d.get("author_name", [])[:2]) or "Autor desconocido"
-        year = d.get("first_publish_year", "s/f")
-        key = d.get("key", "")
-        link = f"https://openlibrary.org{key}"
-        access = d.get("ebook_access", "unknown")
-
-        msg += (
-            f"📖 {title}\n"
-            f"✍️ {authors}\n"
-            f"📅 {year}\n"
-            f"🔗 {link}\n"
-            f"Estado: {access}\n\n"
-        )
-
-    await update.message.reply_text(msg[:4000])
 
 async def libro(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -128,11 +83,10 @@ async def libro(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     book_id = context.args[0]
-
     r = requests.get(f"https://gutendex.com/books/{book_id}", timeout=20)
 
     if r.status_code != 200:
-        await update.message.reply_text("No encontré ese libro en Project Gutenberg.")
+        await update.message.reply_text("No encontré ese libro.")
         return
 
     book = r.json()
@@ -155,20 +109,30 @@ async def libro(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption=f"📖 {title}\nFuente: Project Gutenberg"
     )
 
+async def se(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Falta el enlace de Standard Ebooks.")
+        return
+
+    epub_url = context.args[0]
+    title = epub_url.rstrip("/").split("/")[-1].replace(".epub", "")
+
+    await update.message.reply_document(
+        document=epub_url,
+        filename=f"{title[:80]}.epub",
+        caption="📗 Fuente: Standard Ebooks"
+    )
+
 def main():
     if not TOKEN:
         raise RuntimeError("Falta TELEGRAM_BOT_TOKEN")
 
     app = ApplicationBuilder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("buscar", buscar))
-    app.add_handler(CommandHandler("gutenberg", buscar))
-    app.add_handler(CommandHandler("openlibrary", openlibrary))
     app.add_handler(CommandHandler("libro", libro))
-
+    app.add_handler(CommandHandler("se", se))
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-    
