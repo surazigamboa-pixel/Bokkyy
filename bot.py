@@ -2,125 +2,175 @@ import os
 import requests
 import xml.etree.ElementTree as ET
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 
+def safe_name(text):
+    return "".join(c for c in text[:80] if c.isalnum() or c in " _-").strip() or "libro"
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 Bot de ePub.\n\n"
-        "Usa:\n"
-        "/buscar dracula\n"
-        "/libro 1342\n\n"
-        "Busca en Project Gutenberg y Standard Ebooks."
+        "📚 Mándame el título de un libro.\n\n"
+        "Buscaré ePub en:\n"
+        "• Project Gutenberg\n"
+        "• Standard Ebooks\n"
+        "• Internet Archive\n\n"
+        "Ejemplo:\n"
+        "dracula"
     )
 
-def text_match(query, *texts):
-    q = query.lower()
-    return q in " ".join(t or "" for t in texts).lower()
+async def send_epub(update, url, title, source):
+    try:
+        await update.message.reply_document(
+            document=url,
+            filename=f"{safe_name(title)}.epub",
+            caption=f"📖 {title}\nFuente: {source}"
+        )
+        return True
+    except Exception:
+        return False
 
-async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = " ".join(context.args).strip()
+async def buscar_titulo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text.strip()
     if not query:
-        await update.message.reply_text("Escribe así:\n/buscar dracula")
         return
 
-    await update.message.reply_text("🔎 Buscando ePub legales...")
+    await update.message.reply_text("🔎 Buscando ePub legal...")
 
-    msg = "📚 Resultados:\n\n"
-
-    # Project Gutenberg / Gutendex
+    # 1. Project Gutenberg
     try:
-        r = requests.get("https://gutendex.com/books/", params={"search": query}, timeout=20)
-        for book in r.json().get("results", [])[:6]:
-            title = book.get("title", "Sin título")
-            authors = ", ".join(a.get("name", "") for a in book.get("authors", [])) or "Autor desconocido"
-            book_id = book.get("id")
-            msg += f"📘 {title}\n✍️ {authors}\n⬇️ /libro {book_id}\n\n"
+        r = requests.get(
+            "https://gutendex.com/books/",
+            params={"search": query},
+            timeout=20
+        )
+        results = r.json().get("results", [])
+
+        for book in results[:5]:
+            title = book.get("title", "libro")
+            formats = book.get("formats", {})
+
+            epub_url = None
+            for mime, link in formats.items():
+                if "epub" in mime and "images" in mime:
+                    epub_url = link
+                    break
+            if not epub_url:
+                for mime, link in formats.items():
+                    if "epub" in mime:
+                        epub_url = link
+                        break
+
+            if epub_url:
+                ok = await send_epub(update, epub_url, title, "Project Gutenberg")
+                if ok:
+                    return
+
+        if results:
+            book_id = results[0].get("id")
+            title = results[0].get("title", query)
+            await update.message.reply_text(
+                f"📖 {title}\n"
+                f"No pude enviar el ePub directo, pero está aquí:\n"
+                f"https://www.gutenberg.org/ebooks/{book_id}"
+            )
+            return
     except Exception:
         pass
 
-    # Standard Ebooks OPDS
+    # 2. Standard Ebooks
     try:
         r = requests.get("https://standardebooks.org/opds/all", timeout=30)
         root = ET.fromstring(r.content)
         ns = {"a": "http://www.w3.org/2005/Atom"}
 
-        found = 0
+        q = query.lower()
+
         for entry in root.findall("a:entry", ns):
             title = entry.findtext("a:title", default="", namespaces=ns)
-            author_el = entry.find("a:author/a:name", ns)
-            author = author_el.text if author_el is not None else "Autor desconocido"
+            author = entry.findtext("a:author/a:name", default="", namespaces=ns)
 
-            if not text_match(query, title, author):
+            if q not in f"{title} {author}".lower():
                 continue
 
-            epub = None
+            epub_url = None
+            web_url = None
+
             for link in entry.findall("a:link", ns):
                 href = link.attrib.get("href", "")
                 typ = link.attrib.get("type", "")
+
                 if "epub" in typ or href.endswith(".epub"):
-                    epub = href
-                    break
+                    epub_url = href
+                if typ == "text/html":
+                    web_url = href
 
-            if epub:
-                found += 1
-                msg += f"📗 {title}\n✍️ {author}\n⬇️ /se {epub}\n\n"
+            if epub_url:
+                ok = await send_epub(update, epub_url, title, "Standard Ebooks")
+                if ok:
+                    return
 
-            if found >= 6:
-                break
+            if web_url:
+                await update.message.reply_text(
+                    f"📖 {title}\n"
+                    f"No pude enviar el ePub directo, pero está aquí:\n{web_url}"
+                )
+                return
     except Exception:
         pass
 
-    if msg.strip() == "📚 Resultados:":
-        await update.message.reply_text("No encontré ePub legales para esa búsqueda.")
-    else:
-        await update.message.reply_text(msg[:4000])
+    # 3. Internet Archive
+    try:
+        r = requests.get(
+            "https://archive.org/advancedsearch.php",
+            params={
+                "q": f'title:({query}) AND mediatype:texts',
+                "fl[]": ["identifier", "title"],
+                "rows": 5,
+                "output": "json"
+            },
+            timeout=25
+        )
 
-async def libro(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Escribe así:\n/libro 1342")
-        return
+        docs = r.json().get("response", {}).get("docs", [])
 
-    book_id = context.args[0]
-    r = requests.get(f"https://gutendex.com/books/{book_id}", timeout=20)
+        for item in docs:
+            identifier = item.get("identifier")
+            title = item.get("title", query)
 
-    if r.status_code != 200:
-        await update.message.reply_text("No encontré ese libro.")
-        return
+            meta = requests.get(
+                f"https://archive.org/metadata/{identifier}",
+                timeout=20
+            ).json()
 
-    book = r.json()
-    title = book.get("title", "libro")
-    formats = book.get("formats", {})
+            files = meta.get("files", [])
 
-    epub_url = None
-    for mime, link in formats.items():
-        if "epub" in mime:
-            epub_url = link
-            break
+            epub_file = None
+            for f in files:
+                name = f.get("name", "")
+                if name.lower().endswith(".epub"):
+                    epub_file = name
+                    break
 
-    if not epub_url:
-        await update.message.reply_text("Este libro no tiene ePub disponible.")
-        return
+            if epub_file:
+                epub_url = f"https://archive.org/download/{identifier}/{epub_file}"
+                ok = await send_epub(update, epub_url, title, "Internet Archive")
+                if ok:
+                    return
 
-    await update.message.reply_document(
-        document=epub_url,
-        filename=f"{title[:80]}.epub",
-        caption=f"📖 {title}\nFuente: Project Gutenberg"
-    )
+            await update.message.reply_text(
+                f"📖 {title}\n"
+                f"No encontré ePub directo, pero puedes revisarlo aquí:\n"
+                f"https://archive.org/details/{identifier}"
+            )
+            return
+    except Exception:
+        pass
 
-async def se(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Falta el enlace de Standard Ebooks.")
-        return
-
-    epub_url = context.args[0]
-    title = epub_url.rstrip("/").split("/")[-1].replace(".epub", "")
-
-    await update.message.reply_document(
-        document=epub_url,
-        filename=f"{title[:80]}.epub",
-        caption="📗 Fuente: Standard Ebooks"
+    await update.message.reply_text(
+        "No encontré un ePub legal directo para ese título.\n"
+        "Prueba con otro título o con el autor."
     )
 
 def main():
@@ -129,9 +179,7 @@ def main():
 
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("buscar", buscar))
-    app.add_handler(CommandHandler("libro", libro))
-    app.add_handler(CommandHandler("se", se))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, buscar_titulo))
     app.run_polling()
 
 if __name__ == "__main__":
