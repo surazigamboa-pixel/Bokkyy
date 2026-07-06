@@ -8,7 +8,8 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📚 Hola, soy tu bot de libros legales en ePub.\n\n"
-        "Usa:\n"
+        "Comandos:\n"
+        "/buscar dracula\n"
         "/buscar orgullo prejuicio\n"
         "/libro 1342"
     )
@@ -17,33 +18,41 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args)
 
     if not query:
-        await update.message.reply_text("Escribe algo así:\n/buscar dracula")
+        await update.message.reply_text("Escribe así:\n/buscar don quijote")
         return
 
-    url = "https://gutendex.com/books/"
-    r = requests.get(url, params={"search": query}, timeout=20)
-    data = r.json()
+    r = requests.get(
+        "https://gutendex.com/books/",
+        params={"search": query},
+        timeout=20
+    )
 
+    data = r.json()
     results = data.get("results", [])
 
     if not results:
-        await update.message.reply_text("No encontré libros con esa búsqueda.")
+        await update.message.reply_text("No encontré resultados.")
         return
 
-    mensaje = "📚 Resultados:\n\n"
+    mensaje = "📚 Resultados encontrados:\n\n"
 
     for book in results[:8]:
         title = book.get("title", "Sin título")
         authors = ", ".join(a["name"] for a in book.get("authors", [])) or "Autor desconocido"
         book_id = book.get("id")
 
-        mensaje += f"📖 {title}\n✍️ {authors}\nID: {book_id}\nUsa: /libro {book_id}\n\n"
+        mensaje += (
+            f"📖 {title}\n"
+            f"✍️ {authors}\n"
+            f"ID: {book_id}\n"
+            f"Descargar: /libro {book_id}\n\n"
+        )
 
     await update.message.reply_text(mensaje[:4000])
 
 async def libro(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usa así:\n/libro 1342")
+        await update.message.reply_text("Escribe así:\n/libro 1342")
         return
 
     book_id = context.args[0]
@@ -77,7 +86,7 @@ async def libro(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     if not TOKEN:
-        raise RuntimeError("Falta TELEGRAM_BOT_TOKEN")
+        raise RuntimeError("Falta la variable TELEGRAM_BOT_TOKEN")
 
     app = ApplicationBuilder().token(TOKEN).build()
 
